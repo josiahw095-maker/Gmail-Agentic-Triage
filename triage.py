@@ -1,0 +1,111 @@
+import os
+from google import genai
+from google.genai.types import HttpOptions
+from dotenv import load_dotenv
+from config import ESCALATE_IF_FROM, ESCALATE_IF_TOPIC
+
+load_dotenv()
+PROJECT_ID = os.getenv('PROJECT_ID')
+LOCATION = os.getenv('LOCATION')
+
+DEFAULT_CATEGORIES = [
+    'URGENT: Needs immediate attention',
+    'ACTION: Requires a response or action but not urgent',
+    'INFO: Informational only, no action needed',
+    'ADS: Promotional emails, advertisements, marketing newsletters, deals, coupons, and any email whose primary purpose is to sell something or promote a brand — even if it contains useful information',
+    'RECEIPT: Purchase confirmations and order receipts',
+    'RECORDS: Official documents worth keeping on file, such as bank statements, tax forms, transcripts, insurance, and legal documents',
+    'SPAM: Unwanted or irrelevant email',
+    'OTHER: Does not fit any existing category'
+]
+
+CONFIDENCE_THRESHOLD = 80
+
+
+def init_vertex():
+    return genai.Client(
+        vertexai=True,
+        project=PROJECT_ID,
+        location=LOCATION,
+        http_options=HttpOptions(api_version='v1')
+    )
+
+
+def classify_email(client, subject, body, categories=None):
+    if categories is None:
+        categories = DEFAULT_CATEGORIES
+
+    category_list = '\n'.join(f'- {c}' for c in categories)
+
+    interests_from = ', '.join(ESCALATE_IF_FROM) if ESCALATE_IF_FROM else 'none'
+    interests_topic = ', '.join(ESCALATE_IF_TOPIC) if ESCALATE_IF_TOPIC else 'none'
+
+    prompt = f"""You are an email triage assistant for a college student. Classify the following email.
+
+    Categories:
+    {category_list}
+
+    The user wants to be notified about emails from these senders even if they are ads: {interests_from}
+    The user wants to be notified about emails on these topics even if they are ads: {interests_topic}
+    If the email matches any of these, set ESCALATE to true.
+
+    Email subject: {subject}
+    Email body: {body}
+
+    Respond in this exact format:
+    CATEGORY: <category name only>
+    CONFIDENCE: <0-100>
+    ESCALATE: <true/false>
+    REASON: <one sentence explanation>"""
+
+    response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+    result = parse_response(response.text)
+
+    if (result['confidence'] < CONFIDENCE_THRESHOLD or
+            result['category'] in ('URGENT', 'ACTION') or
+            result['category'] == 'OTHER'):
+        result['escalate'] = True
+
+    if result['category'] == 'OTHER':
+        result['new_category'] = create_new_category(client, subject, body)
+
+    return result
+
+
+def create_new_category(client, subject, body):
+    prompt = f"""You are an email triage assistant. An email has been received that does not fit any existing category.
+Propose a new category name and description for it.
+
+Email subject: {subject}
+Email body: {body}
+
+Respond in this exact format:
+NAME: <short uppercase category name, one or two words>
+DESCRIPTION: <one sentence describing what emails belong in this category>"""
+
+    response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+    return parse_new_category(response.text)
+
+
+def parse_response(text):
+    result = {}
+    for line in text.strip().split('\n'):
+        if line.startswith('CATEGORY:'):
+            result['category'] = line.split(':', 1)[1].strip()
+        elif line.startswith('CONFIDENCE:'):
+            result['confidence'] = int(line.split(':', 1)[1].strip())
+        elif line.startswith('ESCALATE:'):
+            result['escalate'] = line.split(':', 1)[1].strip().lower() == 'true'
+        elif line.startswith('REASON:'):
+            result['reason'] = line.split(':', 1)[1].strip()
+    return result
+
+
+def parse_new_category(text):
+    result = {}
+    for line in text.strip().split('\n'):
+        if line.startswith('NAME:'):
+            result['name'] = line.split(':', 1)[1].strip()
+        elif line.startswith('DESCRIPTION:'):
+            result['description'] = line.split(':', 1)[1].strip()
+    return result

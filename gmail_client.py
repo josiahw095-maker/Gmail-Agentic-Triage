@@ -26,3 +26,59 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 
+def fetch_unread_emails(service, max_emails=10):
+    messages = []
+    page_token = None
+
+    while True:
+        response = service.users().messages().list(
+            userId='me',
+            q='is:unread',
+            maxResults=min(max_emails - len(messages), 500),
+            pageToken=page_token
+        ).execute()
+
+        messages.extend(response.get('messages', []))
+        page_token = response.get('nextPageToken')
+        if not page_token or len(messages) >= max_emails:
+            break
+
+    messages = messages[:max_emails]
+
+    emails = []
+    for msg in messages:
+        full = service.users().messages().get(
+            userId='me',
+            id=msg['id'],
+            format='full'
+        ).execute()
+
+        headers = {h['name']: h['value'] for h in full['payload']['headers']}
+        subject = headers.get('Subject', '(no subject)')
+        sender = headers.get('From', '(unknown sender)')
+        body = extract_body(full['payload'])
+
+        emails.append({
+            'id': msg['id'],
+            'subject': subject,
+            'sender': sender,
+            'body': body
+        })
+
+    return emails
+
+
+def extract_body(payload):
+    if 'parts' in payload:
+        for part in payload['parts']:
+            if part['mimeType'] == 'text/plain':
+                data = part['body'].get('data', '')
+                return _decode(data)
+    return _decode(payload.get('body', {}).get('data', ''))
+
+
+def _decode(data):
+    import base64
+    if not data:
+        return ''
+    return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
