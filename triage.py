@@ -2,7 +2,8 @@ import os
 from google import genai
 from google.genai.types import HttpOptions
 from dotenv import load_dotenv
-from config import ESCALATE_IF_FROM, ESCALATE_IF_TOPIC
+from config import ESCALATE_IF_FROM, ESCALATE_IF_TOPIC, DEPRIORITIZE_IF_FROM
+from db import load_corrections
 
 load_dotenv()
 PROJECT_ID = os.getenv('PROJECT_ID')
@@ -39,6 +40,15 @@ def classify_email(client, subject, body, categories=None):
 
     interests_from = ', '.join(ESCALATE_IF_FROM) if ESCALATE_IF_FROM else 'none'
     interests_topic = ', '.join(ESCALATE_IF_TOPIC) if ESCALATE_IF_TOPIC else 'none'
+    deprioritize_from = ', '.join(DEPRIORITIZE_IF_FROM) if DEPRIORITIZE_IF_FROM else 'none'
+
+    corrections = load_corrections()
+    corrections_text = ''
+    if corrections:
+        lines = ['The user has previously corrected these classifications:']
+        for subj, original, corrected in corrections:
+            lines.append(f'  - "{subj}": {original} → {corrected}')
+        corrections_text = '\n'.join(lines) + '\n'
 
     prompt = f"""You are an email triage assistant for a college student. Classify the following email.
 
@@ -49,6 +59,9 @@ def classify_email(client, subject, body, categories=None):
     The user wants to be notified about emails on these topics even if they are ads: {interests_topic}
     If the email matches any of these, set ESCALATE to true.
 
+    Emails from these senders should be classified as ADS and never escalated unless they contain an invoice, receipt, or important document: {deprioritize_from}
+
+    {corrections_text}
     Email subject: {subject}
     Email body: {body}
 
@@ -66,25 +79,32 @@ def classify_email(client, subject, body, categories=None):
             result['category'] == 'OTHER'):
         result['escalate'] = True
 
-    if result['category'] == 'OTHER':
-        result['new_category'] = create_new_category(client, subject, body)
-
     return result
 
 
-def create_new_category(client, subject, body):
-    prompt = f"""You are an email triage assistant. An email has been received that does not fit any existing category.
-Propose a new category name and description for it.
+def propose_new_categories(client, other_emails):
+    if not other_emails:
+        return []
 
-Email subject: {subject}
-Email body: {body}
+    email_list = ''
+    for i, (subject, body) in enumerate(other_emails, 1):
+        email_list += f"\nEmail {i}:\nSubject: {subject}\nBody: {body[:500]}\n"
 
-Respond in this exact format:
+    prompt = f"""You are an email triage assistant. The following emails could not be classified into any existing category.
+Analyze them as a group and propose the minimum number of new categories needed to cover all of them.
+Some emails may share a category — do not create a separate category for each email.
+
+Emails:
+{email_list}
+
+Respond with one entry per new category in this exact format, repeating for each category:
 NAME: <short uppercase category name, one or two words>
-DESCRIPTION: <one sentence describing what emails belong in this category>"""
+DESCRIPTION: <one sentence describing what emails belong in this category>
+COVERS: <comma-separated list of email numbers this category covers>
+---"""
 
     response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-    return parse_new_category(response.text)
+    return parse_proposed_categories(response.text)
 
 
 def parse_response(text):
@@ -101,11 +121,18 @@ def parse_response(text):
     return result
 
 
-def parse_new_category(text):
-    result = {}
+def parse_proposed_categories(text):
+    categories = []
+    current = {}
     for line in text.strip().split('\n'):
-        if line.startswith('NAME:'):
-            result['name'] = line.split(':', 1)[1].strip()
+        if line.strip() == '---':
+            if 'name' in current and 'description' in current:
+                categories.append(current)
+            current = {}
+        elif line.startswith('NAME:'):
+            current['name'] = line.split(':', 1)[1].strip()
         elif line.startswith('DESCRIPTION:'):
-            result['description'] = line.split(':', 1)[1].strip()
-    return result
+            current['description'] = line.split(':', 1)[1].strip()
+    if 'name' in current and 'description' in current:
+        categories.append(current)
+    return categories

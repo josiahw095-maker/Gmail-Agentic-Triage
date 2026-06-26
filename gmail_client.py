@@ -33,7 +33,7 @@ def fetch_unread_emails(service, max_emails=10):
     while True:
         response = service.users().messages().list(
             userId='me',
-            q='is:unread',
+            q='is:unread -from:me',
             maxResults=min(max_emails - len(messages), 500),
             pageToken=page_token
         ).execute()
@@ -82,3 +82,46 @@ def _decode(data):
     if not data:
         return ''
     return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+
+
+def mark_as_read(service, gmail_id):
+    service.users().messages().modify(
+        userId='me',
+        id=gmail_id,
+        body={'removeLabelIds': ['UNREAD']}
+    ).execute()
+
+
+def apply_label(service, gmail_id, label_name):
+    label_id = get_or_create_label(service, label_name)
+    service.users().messages().modify(
+        userId='me',
+        id=gmail_id,
+        body={'addLabelIds': [label_id]}
+    ).execute()
+
+
+def get_or_create_label(service, label_name):
+    labels = service.users().labels().list(userId='me').execute().get('labels', [])
+    for label in labels:
+        if label['name'] == label_name:
+            return label['id']
+
+    created = service.users().labels().create(
+        userId='me',
+        body={'name': label_name}
+    ).execute()
+    return created['id']
+
+
+def send_email(service, to, subject, body):
+    import base64
+    from email.mime.text import MIMEText
+    message = MIMEText(body)
+    message['to'] = to
+    message['subject'] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    service.users().messages().send(
+        userId='me',
+        body={'raw': raw}
+    ).execute()
