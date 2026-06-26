@@ -1,13 +1,15 @@
 import os
 import sys
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from gmail_client import get_gmail_service, fetch_unread_emails, mark_as_read, apply_label, send_email
-from triage import init_vertex, classify_email, propose_new_categories
+from triage import init_vertex, classify_email, propose_new_categories, summarize_for_digest
 from db import init_db, log_email, save_category, load_categories
 
 load_dotenv()
 MY_EMAIL = os.getenv('MY_EMAIL')
+NTFY_CHANNEL = os.getenv('NTFY_CHANNEL')
 
 BATCH_SIZE = 100
 MAX_WORKERS = 10
@@ -89,26 +91,55 @@ def run_triage(max_emails=100, dry_run=False):
                 print(f"New category saved: {cat['name']} — {cat['description']}")
 
     if escalated and not dry_run:
-        send_escalation_digest(service, escalated)
+        send_escalation_digest(service, client, escalated)
     elif escalated and dry_run:
         print(f"--- DRY RUN: {len(escalated)} email(s) would have been escalated ---")
 
 
-def send_escalation_digest(service, escalated):
-    lines = ['The following emails were flagged for your attention:\n']
+def send_escalation_digest(service, client, escalated):
+    blocks = []
     for email, result in escalated:
-        lines.append(f"[{result['category']}] {email['subject']}")
-        lines.append(f"From:   {email['sender']}")
-        lines.append(f"Reason: {result['reason']}")
-        lines.append('')
-        snippet = email['body'].strip()[:500].replace('\n', ' ')
-        lines.append(snippet)
-        lines.append('')
-        lines.append('-' * 60)
-        lines.append('')
+        summary = summarize_for_digest(client, email['subject'], email['body'], email['sender'], result['reason'])
+        gmail_link = f"https://mail.google.com/mail/u/0/#all/{email['id']}"
+        bullets_html = ''.join(f"<li style='margin:4px 0'>{b}</li>" for b in summary['bullets'])
+        blocks.append(f"""
+        <div style='border:1px solid #ddd;border-radius:6px;padding:16px;margin-bottom:20px;font-family:sans-serif'>
+            <p style='margin:0 0 4px 0;font-size:11px;color:#888;text-transform:uppercase'>{result['category']}</p>
+            <h2 style='margin:0 0 4px 0;font-size:16px'>{email['subject']}</h2>
+            <p style='margin:0 0 12px 0;color:#555;font-size:13px'>From: {email['sender']}</p>
+            <p style='margin:0 0 6px 0'><strong>Context:</strong> {summary['context']}</p>
+            <p style='margin:0 0 6px 0'><strong>Action:</strong> {summary['action']}</p>
+            <ul style='margin:6px 0 12px 0;padding-left:20px'>{bullets_html}</ul>
+            <a href='{gmail_link}' style='color:#1a73e8;font-size:13px'>Open in Gmail →</a>
+        </div>""")
 
-    send_email(service, MY_EMAIL, '[TRIAGE] Emails needing your attention', '\n'.join(lines))
+    body = f"""
+    <div style='max-width:600px;margin:0 auto;padding:20px;font-family:sans-serif'>
+        <h1 style='font-size:20px;margin-bottom:4px'>Triage Digest</h1>
+        <p style='color:#555;margin-top:0'>{len(escalated)} email(s) flagged for your attention</p>
+        {''.join(blocks)}
+    </div>"""
+
+    send_email(service, MY_EMAIL, f'[TRIAGE] {len(escalated)} email(s) need your attention', body, html=True)
+    send_phone_notification(len(escalated))
     print(f"Escalation digest sent — {len(escalated)} email(s) flagged.")
+
+
+def send_phone_notification(count):
+    if not NTFY_CHANNEL:
+        return
+    try:
+        requests.post(
+            f"https://ntfy.sh/{NTFY_CHANNEL}",
+            headers={
+                'Title': 'Email Triage',
+                'Priority': 'high',
+                'Tags': 'email'
+            },
+            data=f"{count} email(s) need your attention. Check your digest."
+        )
+    except Exception as e:
+        print(f"[WARNING] Phone notification failed: {e}")
 
 
 if __name__ == '__main__':

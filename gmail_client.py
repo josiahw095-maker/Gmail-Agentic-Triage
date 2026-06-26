@@ -114,10 +114,10 @@ def get_or_create_label(service, label_name):
     return created['id']
 
 
-def send_email(service, to, subject, body):
+def send_email(service, to, subject, body, html=False):
     import base64
     from email.mime.text import MIMEText
-    message = MIMEText(body)
+    message = MIMEText(body, 'html' if html else 'plain')
     message['to'] = to
     message['subject'] = subject
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()

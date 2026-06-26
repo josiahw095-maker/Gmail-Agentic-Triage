@@ -82,6 +82,41 @@ def classify_email(client, subject, body, categories=None):
     return result
 
 
+def summarize_for_digest(client, subject, body, sender, reason):
+    prompt = f"""You are summarizing an email that has been flagged for a college student's attention.
+Provide a brief, scannable summary in this exact format:
+
+CONTEXT: <one sentence explaining what this email is about>
+ACTION: <one sentence on what the student should do, or "No action required" if informational>
+BULLETS:
+- <key detail>
+- <key detail>
+- <key detail if needed>
+
+Email from: {sender}
+Subject: {subject}
+Reason flagged: {reason}
+Body: {body[:1000]}"""
+
+    response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+    return parse_summary(response.text)
+
+
+def parse_summary(text):
+    result = {'context': '', 'action': '', 'bullets': []}
+    in_bullets = False
+    for line in text.strip().split('\n'):
+        if line.startswith('CONTEXT:'):
+            result['context'] = line.split(':', 1)[1].strip()
+        elif line.startswith('ACTION:'):
+            result['action'] = line.split(':', 1)[1].strip()
+        elif line.startswith('BULLETS:'):
+            in_bullets = True
+        elif in_bullets and line.strip().startswith('-'):
+            result['bullets'].append(line.strip()[1:].strip())
+    return result
+
+
 def propose_new_categories(client, other_emails):
     if not other_emails:
         return []
