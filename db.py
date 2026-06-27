@@ -12,6 +12,13 @@ def init_db():
     cursor = conn.cursor()
 
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS emails (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             gmail_id TEXT UNIQUE,
@@ -83,6 +90,42 @@ def load_categories():
 
     conn.close()
     return [f'{name}: {description}' for name, description in rows]
+
+
+def save_state(key, value):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)', (key, str(value)))
+    conn.commit()
+    conn.close()
+
+
+def load_state(key, default=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT value FROM state WHERE key = ?', (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else default
+
+
+def filter_unprocessed(gmail_ids):
+    conn = get_connection()
+    cursor = conn.cursor()
+    placeholders = ','.join('?' * len(gmail_ids))
+    cursor.execute(f'SELECT gmail_id FROM emails WHERE gmail_id IN ({placeholders})', gmail_ids)
+    already_done = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    return [gid for gid in gmail_ids if gid not in already_done]
+
+
+def delete_categories(names):
+    conn = get_connection()
+    cursor = conn.cursor()
+    for name in names:
+        cursor.execute('DELETE FROM categories WHERE UPPER(name) = UPPER(?)', (name,))
+    conn.commit()
+    conn.close()
 
 
 def log_correction(gmail_id, subject, original_category, corrected_category):
